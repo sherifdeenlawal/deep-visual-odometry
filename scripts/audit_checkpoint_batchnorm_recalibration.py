@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Recalibrate A6 pose-branch BatchNorm buffers without changing learned weights.
+"""Audit and recalibrate A7 pose-branch BatchNorm buffers without weight updates.
 
 For each intact checkpoint, this script performs one deterministic, no-gradient
 pass over training sequences 00--08. Only BatchNorm modules belonging to the
@@ -8,9 +8,11 @@ statistics are recomputed; every parameter and every other state tensor remains
 unchanged. Rotation-only, translation-only, and both-branch evaluation-only
 checkpoints are then derived from that single recalibration pass.
 
-The single-pass derivation is valid for Track-A A6 because Model T is conditioned
+The single-pass derivation is valid for Track-A A7 because Model T is conditioned
 on ground-truth rotation and the rotation/translation AResUNets are separate.
-Frozen semantic and depth auxiliary BatchNorm statistics are never modified.
+Frozen SegFormer and Monodepth2 state is never modified. Model construction is
+delegated to the A7 evaluator so semantic/depth metadata is restored before a
+strict checkpoint load.
 """
 
 from __future__ import annotations
@@ -48,14 +50,13 @@ def parse_args() -> argparse.Namespace:
         description="Recompute pose-branch BatchNorm statistics and evaluate the resulting checkpoints.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--checkpoint-120", type=Path, default=None)
-    parser.add_argument("--checkpoint-180", type=Path, default=None)
+    parser.add_argument("--checkpoint-15", type=Path, default=None)
+    parser.add_argument("--checkpoint-30", type=Path, default=None)
     parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path(
-            "experiments/track_a/paper_reproduction/a6_paper_schedule_120x120/"
-            "checkpoint_batchnorm_recalibration"
+            "experiments/track_a/paper_reproduction/a7_p3_batchnorm_control"
         ),
     )
     parser.add_argument("--data-root", type=Path, default=Path("data"))
@@ -64,7 +65,7 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         default=["00", "01", "02", "03", "04", "05", "06", "07", "08"],
     )
-    parser.add_argument("--recalibration-batch-size", type=int, default=32)
+    parser.add_argument("--recalibration-batch-size", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument(
         "--max-batches",
@@ -116,11 +117,11 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--collect-only and --evaluate are mutually exclusive")
     if args.collect_only:
         return
-    if args.checkpoint_120 is None or args.checkpoint_180 is None:
+    if args.checkpoint_15 is None or args.checkpoint_30 is None:
         raise ValueError(
-            "--checkpoint-120 and --checkpoint-180 are required unless --collect-only is used"
+            "--checkpoint-15 and --checkpoint-30 are required unless --collect-only is used"
         )
-    for path in (args.checkpoint_120, args.checkpoint_180, args.evaluator):
+    for path in (args.checkpoint_15, args.checkpoint_30, args.evaluator):
         if path is None or not path.is_file():
             raise FileNotFoundError("Missing required file: {}".format(path))
     if not args.data_root.is_dir():
@@ -134,7 +135,7 @@ def validate_args(args: argparse.Namespace) -> None:
     if set(args.training_sequences) != {
         "00", "01", "02", "03", "04", "05", "06", "07", "08"
     }:
-        raise ValueError("This A6 diagnostic requires training sequences exactly 00--08")
+        raise ValueError("This A7-P3 diagnostic requires training sequences exactly 00--08")
 
 
 def resolve_device(name: str) -> torch.device:
@@ -185,10 +186,49 @@ def resolve_configuration(
     configuration = evaluator.resolve_evaluation_configuration(minimal_args, checkpoint)
     if not bool(configuration.get("use_ground_truth_rotation", False)):
         raise RuntimeError(
-            "This optimized single-pass A6 diagnostic requires checkpoint "
+            "This optimized single-pass A7 diagnostic requires checkpoint "
             "use_ground_truth_rotation=True."
         )
+    semantic_provider = str(configuration.get("semantic_provider", "")).lower()
+    depth_provider = str(configuration.get("depth_provider", "")).lower()
+    if semantic_provider != "segformer":
+        raise RuntimeError(
+            "A7-P3 requires semantic_provider='segformer'; checkpoint records "
+            "{!r}.".format(semantic_provider)
+        )
+    if depth_provider != "monodepth2":
+        raise RuntimeError(
+            "A7-P3 requires depth_provider='monodepth2'; checkpoint records "
+            "{!r}.".format(depth_provider)
+        )
+    if not bool(configuration.get("freeze_semantic", True)):
+        raise RuntimeError("A7-P3 requires the semantic auxiliary to be frozen")
     return configuration
+
+
+def checkpoint_protocol_record(
+    checkpoint: Mapping[str, Any], configuration: Mapping[str, Any], path: Path
+) -> Dict[str, Any]:
+    epoch = int(checkpoint.get("epoch", -1))
+    recorded_sequences = {
+        str(value).zfill(2) for value in configuration.get("train_sequences", [])
+    }
+    expected = {"00", "01", "02", "03", "04", "05", "06", "07", "08"}
+    if recorded_sequences and recorded_sequences != expected:
+        raise RuntimeError(
+            "Checkpoint {} was not trained on exactly 00--08".format(path)
+        )
+    validation_enabled = bool(configuration.get("validation_enabled", False))
+    if validation_enabled:
+        raise RuntimeError("A7-P3 requires the source-only/no-validation protocol")
+    return {
+        "semantic_provider": str(configuration.get("semantic_provider")),
+        "semantic_model_name": str(configuration.get("semantic_model_name")),
+        "depth_provider": str(configuration.get("depth_provider")),
+        "depth_model_name": str(configuration.get("depth_model_name")),
+        "strict_checkpoint_loading": True,
+        "validation_enabled": validation_enabled,
+    }
 
 
 def build_training_loader(
@@ -260,6 +300,40 @@ def selected_bn_modules(model: nn.Module) -> Dict[str, nn.modules.batchnorm._Bat
     if branches != {"rotation", "translation"}:
         raise RuntimeError("Expected BatchNorm modules in both pose branches; found {}".format(branches))
     return selected
+
+
+def collect_bn_statistics(
+    modules: Mapping[str, nn.modules.batchnorm._BatchNorm],
+    checkpoint_label: str,
+    state: str,
+) -> List[Dict[str, Any]]:
+    """Return layer-level running-statistics diagnostics."""
+    rows: List[Dict[str, Any]] = []
+    for name, module in sorted(modules.items()):
+        if module.running_mean is None or module.running_var is None:
+            raise RuntimeError("BatchNorm module {} does not track running stats".format(name))
+        mean = module.running_mean.detach().float().cpu()
+        variance = module.running_var.detach().float().cpu()
+        rows.append({
+            "checkpoint": checkpoint_label,
+            "state": state,
+            "branch": state_branch(name + ".dummy"),
+            "module": name,
+            "channels": int(mean.numel()),
+            "running_mean_l2": float(torch.linalg.vector_norm(mean).item()),
+            "running_mean_abs_max": float(mean.abs().max().item()),
+            "running_var_mean": float(variance.mean().item()),
+            "running_var_min": float(variance.min().item()),
+            "running_var_max": float(variance.max().item()),
+            "near_zero_var_channels": int((variance <= 1.0e-8).sum().item()),
+            "nonfinite_mean_values": int((~torch.isfinite(mean)).sum().item()),
+            "nonfinite_var_values": int((~torch.isfinite(variance)).sum().item()),
+            "num_batches_tracked": (
+                int(module.num_batches_tracked.detach().cpu().item())
+                if module.num_batches_tracked is not None else None
+            ),
+        })
+    return rows
 
 
 def configure_bn_recalibration(
@@ -556,13 +630,23 @@ def main() -> None:
     checkpoint_dir = args.output_dir / "checkpoints"
     variants: Dict[str, Path] = {}
     manifest_rows: List[Dict[str, Any]] = []
+    bn_statistics_rows: List[Dict[str, Any]] = []
 
-    assert args.checkpoint_120 is not None and args.checkpoint_180 is not None
-    for checkpoint_path in (args.checkpoint_120, args.checkpoint_180):
+    assert args.checkpoint_15 is not None and args.checkpoint_30 is not None
+    for expected_epoch, checkpoint_path in (
+        (15, args.checkpoint_15), (30, args.checkpoint_30)
+    ):
         print("\nRecalibrating {}".format(checkpoint_path), flush=True)
         checkpoint = load_checkpoint(evaluator, checkpoint_path)
         configuration = resolve_configuration(evaluator, checkpoint)
         epoch = int(checkpoint.get("epoch", -1))
+        if epoch != expected_epoch:
+            raise RuntimeError(
+                "{} must contain epoch {}, but records epoch {}".format(
+                    checkpoint_path, expected_epoch, epoch
+                )
+            )
+        protocol = checkpoint_protocol_record(checkpoint, configuration, checkpoint_path)
         # Re-evaluate the intact checkpoint in the same matrix so every
         # recalibrated result has a directly comparable native control.
         variants["native_epoch_{:03d}".format(epoch)] = checkpoint_path
@@ -571,6 +655,12 @@ def main() -> None:
             for key, value in checkpoint["model_state_dict"].items()
         }
         model = evaluator.build_model(checkpoint, configuration, device)
+        # build_model performs the A7 reconstruction and strict state load.
+        native_modules = selected_bn_modules(model)
+        label = "epoch_{:03d}".format(epoch)
+        bn_statistics_rows.extend(
+            collect_bn_statistics(native_modules, label, "native")
+        )
         modules = configure_bn_recalibration(model, args)
         loader = build_training_loader(evaluator, configuration, args, device)
         batches, samples = recalibrate_model(model, loader, configuration, args, device)
@@ -578,6 +668,9 @@ def main() -> None:
         recalibrated_state = {
             key: value.detach().cpu().clone() for key, value in model.state_dict().items()
         }
+        bn_statistics_rows.extend(
+            collect_bn_statistics(modules, label, "recalibrated")
+        )
         verification = verify_recalibrated_state(original_state, recalibrated_state)
         del model, loader
         if device.type == "cuda":
@@ -595,24 +688,26 @@ def main() -> None:
             row = dict({
                 "variant": variant, "checkpoint": str(output_path.resolve()),
                 "recalibrated_modules_total": len(modules),
-            }, **record, **verification)
+            }, **protocol, **record, **verification)
             manifest_rows.append(row)
             print("Created {} ({} changed buffers)".format(output_path, record["changed_buffers"]))
 
     write_csv(args.output_dir / "batchnorm_recalibration_manifest.csv", manifest_rows)
+    write_csv(args.output_dir / "batchnorm_layer_statistics.csv", bn_statistics_rows)
     with (args.output_dir / "batchnorm_recalibration_manifest.json").open("w", encoding="utf-8") as handle:
         json.dump({"variants": manifest_rows}, handle, indent=2, sort_keys=True)
+    with (args.output_dir / "batchnorm_layer_statistics.json").open("w", encoding="utf-8") as handle:
+        json.dump({"layers": bn_statistics_rows}, handle, indent=2, sort_keys=True)
 
     if not args.evaluate:
         print("\nRecalibrated checkpoints created. Add --evaluate to run the evaluation matrix.")
         return
 
-    gt_args = discover_gt_trajectory_args(args)
     extra_args = shlex.split(args.extra_evaluator_args)
     metric_rows: List[Dict[str, Any]] = []
     for variant, checkpoint_path in variants.items():
         for sequence in args.evaluation_sequences:
-            for trajectory_mode, trajectory_args in (("ground_truth", gt_args), ("predicted", [])):
+            for trajectory_mode in ("ground_truth", "predicted"):
                 token = "gt_gt" if trajectory_mode == "ground_truth" else "gt_pred"
                 output_dir = args.output_dir / "evaluations" / variant / "sequence_{}_{}".format(sequence, token)
                 if output_dir.exists() and not args.overwrite:
@@ -626,8 +721,11 @@ def main() -> None:
                     "--batch-size", str(args.evaluation_batch_size),
                     "--num-workers", str(args.num_workers),
                     "--device", args.device,
-                    "--use-ground-truth-rotation",
-                ] + list(trajectory_args) + extra_args
+                    "--require-a6-protocol",
+                    "--model-t-rotation-source", "checkpoint",
+                    "--trajectory-rotation-source", trajectory_mode,
+                    "--translation-scale-factor", ("0.975" if sequence == "09" else "1.007"),
+                ] + extra_args
                 run_command(command, output_dir / "evaluation.log")
                 metric_rows.append(collect_summary(variant, sequence, trajectory_mode, output_dir))
                 write_metric_outputs(args.output_dir, metric_rows)
