@@ -18,6 +18,9 @@ from deepdct.models.deepdct_vo import DeepDCTVO
 from deepdct.models.pose_head import (
     DirectionalTranslationHead,
 )
+from deepdct.training.train_one_epoch import (
+    compute_head_l2_regularization,
+)
 
 
 class DummySemanticBranch(nn.Module):
@@ -965,3 +968,57 @@ def test_unknown_semantic_provider_is_rejected():
             semantic_model=DummySemanticBranch(),
             depth_model=DummyDepthBranch(),
         )
+
+
+def test_a7_p2_dropout_and_scoped_l2(model):
+    """A7-P2 regularizes only pose-head kernels and preserves dropout 0.2."""
+
+    assert model.rotation_head.dropout.p == pytest.approx(0.2)
+    assert model.translation_head.dropout.p == pytest.approx(0.2)
+    assert isinstance(model.rotation_head.dropout, nn.Dropout)
+    assert not isinstance(model.rotation_head.dropout, nn.Dropout2d)
+    assert isinstance(model.translation_head.dropout, nn.Dropout)
+    assert not isinstance(model.translation_head.dropout, nn.Dropout2d)
+
+    conv_l2 = 0.02
+    dense_l2 = 0.03
+    expected = conv_l2 * (
+        model.rotation_head.conv.weight.square().sum()
+        + model.translation_head.conv.weight.square().sum()
+    ) + dense_l2 * (
+        model.rotation_head.dense.weight.square().sum()
+        + model.translation_head.dense.weight.square().sum()
+    )
+
+    actual = compute_head_l2_regularization(
+        model,
+        conv_l2=conv_l2,
+        dense_l2=dense_l2,
+    )
+
+    assert torch.allclose(actual, expected)
+
+    model.zero_grad(set_to_none=True)
+    actual.backward()
+
+    selected = {
+        "rotation_head.conv.weight",
+        "rotation_head.dense.weight",
+        "translation_head.conv.weight",
+        "translation_head.dense.weight",
+    }
+    for name, parameter in model.named_parameters():
+        if name in selected:
+            assert parameter.grad is not None
+            assert torch.isfinite(parameter.grad).all()
+        else:
+            assert parameter.grad is None
+
+
+def test_a7_p2_zero_l2_is_exactly_zero(model):
+    penalty = compute_head_l2_regularization(
+        model,
+        conv_l2=0.0,
+        dense_l2=0.0,
+    )
+    assert penalty.item() == 0.0

@@ -33,6 +33,9 @@ from torch import Tensor
 from deepdct.training.rotation_geometry import (
     RotationGeometryBank,
 )
+from deepdct.training.train_one_epoch import (
+    compute_head_l2_regularization,
+)
 
 
 Batch = Mapping[str, Union[Tensor, str, int]]
@@ -44,6 +47,8 @@ class ValidationMetrics:
     """Aggregated metrics returned after one validation epoch."""
 
     total_loss: float
+    pose_data_loss: float
+    regularization_loss: float
     rotation_loss: float
     translation_loss: float
     rotation_geometry_loss: float
@@ -57,6 +62,8 @@ class ValidationMetrics:
     def as_dict(self) -> Dict[str, Union[float, int]]:
         return {
             "total_loss": self.total_loss,
+            "pose_data_loss": self.pose_data_loss,
+            "regularization_loss": self.regularization_loss,
             "rotation_loss": self.rotation_loss,
             "translation_loss": self.translation_loss,
             "rotation_geometry_loss": (
@@ -81,6 +88,8 @@ def validate_one_epoch(
     rotation_geometry_loss_fn: Optional[
         RotationGeometryBank
     ] = None,
+    head_conv_l2: float = 0.0,
+    head_dense_l2: float = 0.0,
     use_ground_truth_rotation: bool = False,
     log_interval: Optional[int] = None,
     epoch_index: Optional[int] = None,
@@ -167,6 +176,8 @@ def validate_one_epoch(
         rotation_loss_weight=rotation_loss_weight,
         translation_loss_weight=translation_loss_weight,
         rotation_geometry_weight=rotation_geometry_weight,
+        head_conv_l2=head_conv_l2,
+        head_dense_l2=head_dense_l2,
         log_interval=log_interval,
     )
 
@@ -214,6 +225,8 @@ def validate_one_epoch(
     model.eval()
 
     running_total_loss = 0.0
+    running_pose_data_loss = 0.0
+    running_regularization_loss = 0.0
     running_rotation_loss = 0.0
     running_translation_loss = 0.0
     running_rotation_geometry_loss = 0.0
@@ -376,12 +389,20 @@ def validate_one_epoch(
             # constructed for BOTH geometry-enabled and geometry-disabled
             # validation.
             # --------------------------------------------------------------
-            total_loss = (
+            pose_data_loss = (
                 rotation_loss_weight * rotation_loss
                 + translation_loss_weight * translation_loss
                 + rotation_geometry_weight
                 * rotation_geometry_loss
             )
+
+            regularization_loss = compute_head_l2_regularization(
+                model=model,
+                conv_l2=head_conv_l2,
+                dense_l2=head_dense_l2,
+            )
+
+            total_loss = pose_data_loss + regularization_loss
 
             if not torch.isfinite(total_loss):
                 message = (
@@ -391,7 +412,9 @@ def validate_one_epoch(
                     f"translation_loss="
                     f"{translation_loss.detach().item()}, "
                     f"rotation_geometry_loss="
-                    f"{rotation_geometry_loss.detach().item()}."
+                    f"{rotation_geometry_loss.detach().item()}, "
+                    f"regularization_loss="
+                    f"{regularization_loss.detach().item()}."
                 )
 
                 if skip_nonfinite_batches:
@@ -412,6 +435,12 @@ def validate_one_epoch(
             total_loss_value = float(
                 total_loss.detach().item()
             )
+            pose_data_loss_value = float(
+                pose_data_loss.detach().item()
+            )
+            regularization_loss_value = float(
+                regularization_loss.detach().item()
+            )
 
 
             running_rotation_loss += (
@@ -422,6 +451,12 @@ def validate_one_epoch(
             )
             running_total_loss += (
                 total_loss_value * batch_size
+            )
+            running_pose_data_loss += (
+                pose_data_loss_value * batch_size
+            )
+            running_regularization_loss += (
+                regularization_loss_value * batch_size
             )
             running_rotation_geometry_loss += (
                 rotation_geometry_loss_value
@@ -441,6 +476,10 @@ def validate_one_epoch(
                     processed_batches=processed_batches,
                     processed_samples=processed_samples,
                     running_total_loss=running_total_loss,
+                    running_pose_data_loss=running_pose_data_loss,
+                    running_regularization_loss=(
+                        running_regularization_loss
+                    ),
                     running_rotation_loss=running_rotation_loss,
                     running_translation_loss=running_translation_loss,
                     running_rotation_geometry_loss=(
@@ -459,6 +498,14 @@ def validate_one_epoch(
     return ValidationMetrics(
         total_loss=(
             running_total_loss
+            / processed_samples
+        ),
+        pose_data_loss=(
+            running_pose_data_loss
+            / processed_samples
+        ),
+        regularization_loss=(
+            running_regularization_loss
             / processed_samples
         ),
         rotation_loss=(
@@ -773,6 +820,8 @@ def _validate_configuration(
     rotation_loss_weight: float,
     translation_loss_weight: float,
     rotation_geometry_weight: float,
+    head_conv_l2: float,
+    head_dense_l2: float,
     log_interval: Optional[int],
 ) -> None:
     """Validate validation-loop configuration."""
@@ -787,6 +836,8 @@ def _validate_configuration(
             "rotation_geometry_weight",
             rotation_geometry_weight,
         ),
+        ("head_conv_l2", head_conv_l2),
+        ("head_dense_l2", head_dense_l2),
     ):
         if not isinstance(value, (int, float)):
             raise TypeError(
@@ -830,6 +881,8 @@ def _print_progress(
     processed_batches: int,
     processed_samples: int,
     running_total_loss: float,
+    running_pose_data_loss: float,
+    running_regularization_loss: float,
     running_rotation_loss: float,
     running_translation_loss: float,
     running_rotation_geometry_loss: float,
@@ -844,6 +897,12 @@ def _print_progress(
 
     average_total = (
         running_total_loss / processed_samples
+    )
+    average_pose_data = (
+        running_pose_data_loss / processed_samples
+    )
+    average_regularization = (
+        running_regularization_loss / processed_samples
     )
     average_rotation = (
         running_rotation_loss / processed_samples
@@ -862,6 +921,8 @@ def _print_progress(
         f"processed_batches={processed_batches} "
         f"samples={processed_samples} "
         f"loss={average_total:.6f} "
+        f"pose_data_loss={average_pose_data:.6f} "
+        f"regularization_loss={average_regularization:.6f} "
         f"rotation_loss={average_rotation:.6f} "
         f"translation_loss={average_translation:.6f} "
         f"rotation_geometry_loss="

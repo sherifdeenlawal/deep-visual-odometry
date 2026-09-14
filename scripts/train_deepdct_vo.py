@@ -221,6 +221,26 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--head-conv-l2",
+        type=float,
+        default=0.0,
+        help=(
+            "Explicit Keras-style L2 coefficient for only the rotation "
+            "and translation head convolution weights."
+        ),
+    )
+
+    parser.add_argument(
+        "--head-dense-l2",
+        type=float,
+        default=0.0,
+        help=(
+            "Explicit Keras-style L2 coefficient for only the rotation "
+            "and translation head dense weights."
+        ),
+    )
+
+    parser.add_argument(
         "--height",
         type=int,
         default=120,
@@ -921,6 +941,24 @@ def validate_args(args: argparse.Namespace) -> None:
 
     if args.weight_decay < 0:
         raise ValueError("--weight-decay cannot be negative.")
+
+    for option_name, value in (
+        ("--head-conv-l2", args.head_conv_l2),
+        ("--head-dense-l2", args.head_dense_l2),
+    ):
+        if not math.isfinite(value) or value < 0.0:
+            raise ValueError(
+                f"{option_name} must be finite and non-negative."
+            )
+
+    if (
+        (args.head_conv_l2 > 0.0 or args.head_dense_l2 > 0.0)
+        and args.weight_decay != 0.0
+    ):
+        raise ValueError(
+            "Explicit head L2 cannot be combined with nonzero global "
+            "--weight-decay; doing so would confound A7-P2."
+        )
 
     if args.height <= 0 or args.width <= 0:
         raise ValueError(
@@ -2455,6 +2493,12 @@ def save_checkpoint(
             "epochs": args.epochs,
             "learning_rate": args.learning_rate,
             "weight_decay": args.weight_decay,
+            "head_conv_l2": args.head_conv_l2,
+            "head_dense_l2": args.head_dense_l2,
+            "regularization_scope": "pose_head_kernels_only",
+            "regularization_formula": "coefficient_times_sum_squared_weights",
+            "head_dropout_type": "elementwise",
+            "head_dropout_probability": 0.2,
             "rotation_loss_weight": (
                 args.rotation_loss_weight
             ),
@@ -2726,6 +2770,11 @@ def print_run_summary(
     f"{args.sampling_strategy}"
     )
     print(f"Epochs:               {args.epochs}")
+    print(f"Global weight decay:  {args.weight_decay:.6g}")
+    print(f"Head Conv2D L2:       {args.head_conv_l2:.6g}")
+    print(f"Head Dense L2:        {args.head_dense_l2:.6g}")
+    print("Regularization scope: pose-head weight tensors only")
+    print("Head dropout:         element-wise p=0.2")
     print(
         f"Trainable parameters: "
         f"{trainable_parameters:,}"
@@ -3025,6 +3074,14 @@ def print_epoch_summary(
         f"{training_metrics.total_loss:.6f}"
     )
     print(
+        f"Train pose data loss:   "
+        f"{training_metrics.pose_data_loss:.6f}"
+    )
+    print(
+        f"Train regularization:   "
+        f"{training_metrics.regularization_loss:.6f}"
+    )
+    print(
         f"Train rotation loss:    "
         f"{training_metrics.rotation_loss:.6f}"
     )
@@ -3045,6 +3102,14 @@ def print_epoch_summary(
         print(
             f"Validation total loss:  "
             f"{validation_metrics.total_loss:.6f}"
+        )
+        print(
+            f"Validation pose data:   "
+            f"{validation_metrics.pose_data_loss:.6f}"
+        )
+        print(
+            f"Validation regularizer: "
+            f"{validation_metrics.regularization_loss:.6f}"
         )
         print(
             f"Validation rotation:    "
@@ -4185,6 +4250,8 @@ def main() -> None:
             rotation_geometry_loss_fn=(
                 rotation_geometry_loss_fn
             ),
+            head_conv_l2=args.head_conv_l2,
+            head_dense_l2=args.head_dense_l2,
             use_ground_truth_rotation=(
                 args.use_ground_truth_rotation
             ),
@@ -4262,6 +4329,8 @@ def main() -> None:
                 rotation_geometry_loss_fn=(
                     rotation_geometry_loss_fn
                 ),
+                head_conv_l2=args.head_conv_l2,
+                head_dense_l2=args.head_dense_l2,
             )
 
             scheduler.step(

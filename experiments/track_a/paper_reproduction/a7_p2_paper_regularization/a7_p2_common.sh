@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+A7_P2_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+A7_P2_REPO_ROOT="$(cd "${A7_P2_SCRIPT_DIR}/../../../.." && pwd)"
+A7_P2_OUTPUT_ROOT="${A7_P2_REPO_ROOT}/experiments/track_a/paper_reproduction/a7_p2_paper_regularization"
+A7_P2_CHECKPOINT_DIR="${A7_P2_OUTPUT_ROOT}/checkpoints"
+A7_P2_CHECKPOINT="${A7_P2_CHECKPOINT_DIR}/latest.pt"
+A7_P2_DATA_ROOT="${A7_P2_DATA_ROOT:-${A7_P2_REPO_ROOT}/data}"
+A7_P2_DEPTH_WEIGHTS="${A7_P2_DEPTH_WEIGHTS:-${A7_P2_REPO_ROOT}/weights/mono_640x192}"
+A7_P2_SEMANTIC_MODEL="${A7_P2_SEMANTIC_MODEL:-nvidia/segformer-b0-finetuned-ade-512-512}"
+A7_P2_DEVICE="${A7_P2_DEVICE:-auto}"
+A7_P2_HEAD_CONV_L2="${A7_P2_HEAD_CONV_L2:-0.02}"
+A7_P2_HEAD_DENSE_L2="${A7_P2_HEAD_DENSE_L2:-0.02}"
+
+export A7_P2_SCRIPT_DIR A7_P2_REPO_ROOT A7_P2_OUTPUT_ROOT
+export A7_P2_CHECKPOINT_DIR A7_P2_CHECKPOINT A7_P2_DATA_ROOT
+export A7_P2_DEPTH_WEIGHTS A7_P2_SEMANTIC_MODEL A7_P2_DEVICE
+export A7_P2_HEAD_CONV_L2 A7_P2_HEAD_DENSE_L2
+
+cd "${A7_P2_REPO_ROOT}"

@@ -110,7 +110,10 @@ class RegressionHead(nn.Module):
         self.relu = nn.ReLU(inplace=True)
 
         # The paper states dropout=0.2 for the Conv2D stage.
-        self.dropout = nn.Dropout2d(
+        # Keras Dropout is element-wise. Dropout2d would drop the entire
+        # post-fusion channel (C=1), which is especially destructive for the
+        # GTX-1650 batch-size-1 protocol.
+        self.dropout = nn.Dropout(
             p=dropout,
         )
 

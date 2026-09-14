@@ -1,132 +1,93 @@
-# A7 SegFormer + Monodepth2 drop-in
+# A7-P2 Paper-Style Regularization Drop-In
 
-This bundle is based on the supplied A6 files and keeps the A6 source-only
-protocol. A7 changes only the semantic auxiliary from LR-ASPP to SegFormer.
+Extract this archive over the repository root. It updates four runtime files,
+two existing tests, and adds the A7-P2 experiment wrappers.
 
-## 1. Install the additional dependency
+## Controlled intervention
 
-From the activated project virtual environment:
+A7-P2 preserves the A7-P1 network topology, frozen SegFormer/Monodepth2 cues,
+00-08 source-only split, MAE objective, learning rate, batch size, and 30-epoch
+duration. It makes two paper-protocol corrections: explicit layer-scoped L2
+and element-wise dropout semantics.
 
-```bash
-python -m pip install "transformers==4.46.3"
+```text
+0.02 * sum(rotation_head.conv.weight ** 2)
++ 0.02 * sum(translation_head.conv.weight ** 2)
++ 0.02 * sum(rotation_head.dense.weight ** 2)
++ 0.02 * sum(translation_head.dense.weight ** 2)
 ```
 
-The first preflight run downloads
-`nvidia/segformer-b0-finetuned-ade-512-512` unless `A7_SEMANTIC_MODEL` points to
-a local model directory. After it is cached, set
-`A7_SEMANTIC_MODEL=/path/to/local/model` for offline use.
+Biases, A-ResUNet, BatchNorm, SegFormer, and Monodepth2 are excluded. Global
+Adam weight decay remains zero. The paper explicitly gives 0.02 for the
+post-fusion Conv2D and says the dense layer is also L2-regularized without
+stating a second coefficient; A7-P2 records the controlled assumption that the
+dense coefficient is also 0.02. Both coefficients are independent environment
+variables and checkpoint fields.
 
-## 2. Place the files
+The probability remains 0.2, but `Dropout2d` is changed to ordinary
+`nn.Dropout`. Keras `Dropout` is element-wise; PyTorch `Dropout2d` masks entire
+channels. Because the post-fusion head has only one channel and training uses
+batch size 1, `Dropout2d(p=0.2)` can erase the complete head representation for
+roughly one fifth of samples.
 
-Copy the bundle contents over the repository root:
+## Updated existing files
+
+- `deepdct/training/train_one_epoch.py`
+- `deepdct/training/validate_one_epoch.py`
+- `deepdct/models/pose_head.py`
+- `scripts/train_deepdct_vo.py`
+- `scripts/evaluate_deepdct_vo.py`
+- `tests/integration/test_single_batch_training_step.py`
+- `tests/models/test_deepdct_forward.py`
+
+## New wrappers
+
+- `experiments/track_a/paper_reproduction/a7_p2_paper_regularization/a7_p2_common.sh`
+- `experiments/track_a/paper_reproduction/a7_p2_paper_regularization/preflight.sh`
+- `experiments/track_a/paper_reproduction/a7_p2_paper_regularization/train.sh`
+- `experiments/track_a/paper_reproduction/a7_p2_paper_regularization/evaluate.sh`
+- `experiments/track_a/paper_reproduction/a7_p2_paper_regularization/evaluate_gt_rotation.sh`
+- `experiments/track_a/paper_reproduction/a7_p2_paper_regularization/audit_rotation_attribution.sh`
+- `experiments/track_a/paper_reproduction/a7_p2_paper_regularization/run_a7_p2.sh`
+
+## Install and run
 
 ```bash
-cp -a a7_segformer_monodepth2_dropin/. /media/sherifdeen/ext_hd250/projects/deepdct-vo/
 cd /media/sherifdeen/ext_hd250/projects/deepdct-vo
-chmod +x experiments/track_a/paper_reproduction/a7_segformer_monodepth2/*.sh
+unzip -o a7_p2_regularization_dropin.zip
+
+chmod +x \
+  experiments/track_a/paper_reproduction/a7_p2_paper_regularization/*.sh
+
+experiments/track_a/paper_reproduction/a7_p2_paper_regularization/preflight.sh
+experiments/track_a/paper_reproduction/a7_p2_paper_regularization/run_a7_p2.sh
 ```
 
-The copied paths are:
+`train.sh` refuses to overwrite an existing A7-P2 `latest.pt`. This enforces a
+fresh initialization and prevents accidental continuation from unregularized
+A7-P1.
 
-- `deepdct/models/auxiliary/segformer.py` — new provider.
-- `deepdct/models/deepdct_vo.py` — complete A7 replacement based on the
-  supplied `deepdct_vo(7).py`.
-- `scripts/train_deepdct_vo.py` — complete A7 replacement based on the
-  supplied `train_deepdct_vo(7).py`.
-- `scripts/evaluate_deepdct_vo.py` — complete A7 replacement based on the
-  supplied `evaluate_deepdct_vo(20260907-123710).py`.
-- `tests/models/test_deepdct_forward.py` — complete A7 replacement based on
-  the supplied test file.
-- `experiments/track_a/paper_reproduction/a7_segformer_monodepth2/` — wrapper.
-
-## 3. Exact modification anchors
-
-### `deepdct/models/deepdct_vo.py`
-
-1. Immediately after the `lraspp_fig2` import, import
-   `SegFormerSemanticBranch` and `DEFAULT_FOREGROUND_LABELS`.
-2. In `DeepDCTVO.__init__`, immediately after `semantic_map_mode`, add the
-   `semantic_provider`, model identity, foreground IDs/labels, feed size,
-   local-files-only, and injectable `semantic_model` parameters.
-3. Immediately after `self.semantic_map_mode`, normalize and validate the new
-   provider configuration.
-4. Replace the unconditional `self.semantic_model = LRASPPSemanticBranch(...)`
-   block with the three-way injected/LR-ASPP/SegFormer construction block.
-5. Freeze the selected semantic module generically after construction. The
-   existing `train()` override continues forcing it into evaluation mode.
-
-### `scripts/train_deepdct_vo.py`
-
-1. In `parse_args()`, immediately after the pretrained-semantic defaults, add
-   all `--semantic-*` SegFormer options.
-2. In `validate_args()`, immediately after depth-normalization validation, add
-   semantic feed-size, model-name, map-mode, and frozen-provider checks.
-3. In `build_model()`, immediately after `semantic_map_mode=...`, forward the
-   complete semantic-provider configuration to `DeepDCTVO`.
-4. In both checkpoint configuration dictionaries, replace hard-coded
-   `semantic_model: lraspp` and record provider, model ID, resolved class IDs,
-   label names, feed size, and local-files-only state.
-5. In the training configuration report, replace the hard-coded LR-ASPP label
-   with the selected provider and print the SegFormer-specific configuration.
-
-### `scripts/evaluate_deepdct_vo.py`
-
-1. In `resolve_evaluation_configuration()`, immediately after resolving
-   `semantic_map_mode`, recover the provider and all SegFormer parameters.
-   `semantic_model` remains a backward-compatible fallback for older
-   checkpoints.
-2. Add those values to the returned evaluation configuration.
-3. In `build_model()`, pass them to `DeepDCTVO` before the existing strict
-   `load_state_dict(..., strict=True)` call. This ordering is essential.
-4. Replace hard-coded LR-ASPP reporting with provider-aware reporting.
-
-### `tests/models/test_deepdct_forward.py`
-
-1. Give `DummySemanticBranch` a trainable scalar so freezing can be asserted.
-2. Append tests for injected SegFormer-provider configuration, one-channel
-   output shapes, parameter freezing/eval mode, and invalid-provider rejection.
-3. The real model download/inference smoke test belongs in `preflight.sh`, not
-   the ordinary unit suite.
-
-## 4. Run A7
-
-Run each phase independently:
+To run only training after preflight:
 
 ```bash
-experiments/track_a/paper_reproduction/a7_segformer_monodepth2/preflight.sh
-experiments/track_a/paper_reproduction/a7_segformer_monodepth2/train.sh
-experiments/track_a/paper_reproduction/a7_segformer_monodepth2/evaluate.sh
-experiments/track_a/paper_reproduction/a7_segformer_monodepth2/evaluate_gt_gt.sh
+experiments/track_a/paper_reproduction/a7_p2_paper_regularization/train.sh
 ```
 
-Or run the full pipeline:
+To override the two independently recorded coefficients:
 
 ```bash
-experiments/track_a/paper_reproduction/a7_segformer_monodepth2/run_a7.sh
+A7_P2_HEAD_CONV_L2=0.02 \
+A7_P2_HEAD_DENSE_L2=0.01 \
+experiments/track_a/paper_reproduction/a7_p2_paper_regularization/train.sh
 ```
 
-Optional environment overrides:
+## Loss reporting
 
-```bash
-export A7_DATA_ROOT=/media/sherifdeen/ext_hd250/projects/deepdct-vo/data
-export A7_DEPTH_WEIGHTS=/media/sherifdeen/ext_hd250/projects/deepdct-vo/weights/mono_640x192
-export A7_SEMANTIC_MODEL=nvidia/segformer-b0-finetuned-ade-512-512
-export A7_DEVICE=cuda
-```
+Training and validation report:
 
-## 5. Controlled-comparison contract
+- `pose_data_loss`: weighted rotation + translation + optional geometry loss.
+- `regularization_loss`: explicit selected-kernel L2 penalty.
+- `total_loss`: the actual optimization objective, equal to their sum.
 
-- Train sequences: 00–08 only.
-- Validation: disabled.
-- Selected checkpoint: fixed epoch 15 `latest.pt`.
-- Test sequences: unseen 09 and 10.
-- Model-T conditioning during training: ground-truth rotation.
-- Semantic cue: frozen SegFormer B0 foreground probability.
-- Depth cue: frozen Monodepth2 `mono_640x192`, normalized to 80 m.
-- Translation decoder: dense.
-- Evaluation scale: 1.0, so no A5 trajectory rescaling contaminates A7.
-
-The default foreground set contains dynamic road participants. The resolved
-numeric IDs are stored in the checkpoint and reused by evaluation, preventing
-class-map drift during strict reconstruction.
-
+Evaluation never adds a regularization penalty. It prints the checkpoint's
+coefficients and scope only to make P1/P2 result attribution unambiguous.

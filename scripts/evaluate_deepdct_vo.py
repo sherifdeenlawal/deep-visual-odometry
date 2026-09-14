@@ -1027,6 +1027,21 @@ def resolve_evaluation_configuration(
         "rotation_geometry_supervision": (
             rotation_geometry_supervision
         ),
+        "head_conv_l2": float(
+            configuration.get("head_conv_l2", 0.0)
+        ),
+        "head_dense_l2": float(
+            configuration.get("head_dense_l2", 0.0)
+        ),
+        "regularization_scope": str(
+            configuration.get("regularization_scope", "none")
+        ),
+        "head_dropout_type": str(
+            configuration.get("head_dropout_type", "legacy_unspecified")
+        ),
+        "head_dropout_probability": float(
+            configuration.get("head_dropout_probability", 0.2)
+        ),
         "semantic_model": str(
             configuration.get(
                 "semantic_model",
@@ -3394,6 +3409,24 @@ def print_summary(
     print(
         f"Rotation norm scale:    "
         f"{float(evaluation_configuration['rotation_normalization_scale']):.6f}"
+    )
+
+    print(
+        f"Head Conv2D L2:         "
+        f"{float(evaluation_configuration['head_conv_l2']):.6f}"
+    )
+    print(
+        f"Head Dense L2:          "
+        f"{float(evaluation_configuration['head_dense_l2']):.6f}"
+    )
+    print(
+        f"Regularization scope:   "
+        f"{evaluation_configuration['regularization_scope']}"
+    )
+    print(
+        f"Head dropout:           "
+        f"{evaluation_configuration['head_dropout_type']} "
+        f"p={float(evaluation_configuration['head_dropout_probability']):.3f}"
     )
 
     print(
