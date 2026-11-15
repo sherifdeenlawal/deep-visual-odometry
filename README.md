@@ -47,11 +47,13 @@ ATE is calculated directly between the supplied trajectories, without fitted rig
 
 The supplied evaluation reports 16.80 pairs/s on the GTX reference run. This is evaluation throughput, not a Jetson benchmark. Jetson performance numbers are omitted pending the original benchmark output and hardware settings.
 
-![LR-ASPP + Lite-Mono trajectory on KITTI sequence 10](assets/kitti_10_lraspp_litemono_trajectory.png)
+## KITTI sequence 10 demo
 
-![Position components](assets/kitti_10_lraspp_litemono_position_components.png)
+The demo shows **A6 + Monodepth2, epoch 15**, a diagnostic run that uses ground-truth rotation for both translation conditioning and trajectory integration. It recorded **29.247 m unaligned ATE RMSE** at translation scale 1.0, the lowest among the ground-truth-assisted sequence 10 runs in the supplied audit.
 
-Both plots use the supplied poses directly, with no fitted alignment or rescaling. The trajectory shows substantial accumulated drift; this project is an experimental reproduction rather than a production localization system.
+![A6 Monodepth2 trajectory and KITTI ground truth](assets/kitti_10_monodepth2_gt_rotation_trajectory.png)
+
+[Watch the synchronized camera and x/y/z trajectory reel (MP4)](assets/kitti_10_monodepth2_gt_rotation_demo.mp4)
 
 ## Experiments
 
