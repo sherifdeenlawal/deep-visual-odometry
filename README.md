@@ -53,7 +53,7 @@ The demo shows **A6 + Monodepth2, epoch 15**, a diagnostic run that uses ground-
 
 ![A6 Monodepth2 trajectory and KITTI ground truth](assets/kitti_10_monodepth2_gt_rotation_trajectory.png)
 
-[Watch the synchronized camera and x/y/z trajectory reel (MP4)](assets/kitti_10_monodepth2_gt_rotation_demo.mp4)
+[Watch the synchronized camera and x/y/z trajectory reel (MP4)](https://drive.google.com/file/d/1eE51GUaeLEr9v9Df0bMezalkubL871jl/view?usp=sharing)
 
 ## Experiments
 
